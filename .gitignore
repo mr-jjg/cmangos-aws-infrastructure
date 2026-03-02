@@ -1,0 +1,19 @@
+# Terraform
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/*.tfvars
+**/*.auto.tfvars
+crash.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

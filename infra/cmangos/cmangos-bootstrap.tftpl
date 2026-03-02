@@ -1,0 +1,169 @@
+#!/bin/bash
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+# Phase 1: Baseline OS
+# - Refresh package index
+# - Apply available updates (security + stability)
+apt-get update -y
+apt-get upgrade -y
+
+# Install Docker from official upstream repository
+# - Avoid distro version lag (docker.io)
+# - Use scoped GPG key verification for supply-chain integrity
+
+# Prerequisites for secure repo setup
+apt-get install -y ca-certificates curl gnupg
+
+# Create keyring directory (modern APT best practice)
+install -m 0755 -d /etc/apt/keyrings
+
+# Import Docker's signing key (binary keyring format)
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+  gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add Docker repository for this architecture + Ubuntu release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker Engine + build + compose tooling
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now docker
+docker version
+
+
+# Phase 2: Build CMaNGOS Classic container image
+# - Keep host minimal; compile inside Docker
+# - Produce reproducible multi-stage image
+
+# Install source control (build context only)
+apt-get update -y
+apt-get install -y git
+
+# Create service root directory
+mkdir -p /srv/cmangos
+chown -R ubuntu:ubuntu /srv/cmangos
+
+# Clone CMaNGOS Classic source
+cd /srv/cmangos
+if [ ! -d mangos/.git ]; then
+  git clone https://github.com/cmangos/mangos-classic.git mangos
+fi
+
+# Define multi-stage Dockerfile
+# - Stage 1: compile binaries
+# - Stage 2: minimal runtime image
+cat > /srv/cmangos/Dockerfile <<'EOF'
+FROM ubuntu:24.04 AS build
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+  build-essential gcc g++ automake autoconf make patch libtool \
+  cmake pkg-config git \
+  libssl-dev zlib1g-dev libbz2-dev \
+  libboost-all-dev libmysqlclient-dev ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY mangos/ /src/mangos/
+
+WORKDIR /src/build
+RUN cmake ../mangos \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/opt/cmangos/run \
+    -DPCH=1 \
+    -DDEBUG=0 \
+    -DBUILD_PLAYERBOTS=OFF \
+    -DBUILD_AHBOT=OFF \
+ && make -j"$(nproc)" \
+ && make install
+
+FROM ubuntu:24.04 AS runtime
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+  ca-certificates libssl3 zlib1g libbz2-1.0 \
+  libstdc++6 libgcc-s1 libmysqlclient21 \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/cmangos
+COPY --from=build /opt/cmangos/run/ /opt/cmangos/run/
+
+CMD ["/bin/bash", "-lc", "ls -la /opt/cmangos/run/bin && ls -la /opt/cmangos/run/etc | sed -n '1,40p' && echo OK"]
+EOF
+
+# Wait for Docker daemon
+until docker info >/dev/null 2>&1; do sleep 1; done
+
+
+# Phase 3: Fetch config + client from S3
+apt-get update -y
+apt-get install -y unzip curl
+
+# Install AWS CLI v2 (Ubuntu 24.04-safe)
+cd /tmp
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip -q awscliv2.zip
+./aws/install
+
+aws --version
+aws sts get-caller-identity
+
+mkdir -p /srv/cmangos/etc /srv/cmangos/assets/client
+chown -R ubuntu:ubuntu /srv/cmangos
+
+aws s3 sync "s3://${bucket}/configs/${config_version}/etc/" /srv/cmangos/etc/
+
+if [ -n "${client_key}" ]; then
+  aws s3 cp "s3://${bucket}/${client_key}" /srv/cmangos/assets/client/wow.zip
+fi
+
+ls -la /srv/cmangos/etc | sed -n '1,80p'
+ls -lh /srv/cmangos/assets/client | sed -n '1,40p'
+
+
+# Phase 4: Build image
+cd /srv/cmangos
+docker build -t cmangos-classic:local .
+
+
+# Phase 5: Pull extracted map assets (dbc/maps/vmaps/mmaps) to host
+mkdir -p /srv/cmangos/assets/extracted
+chown -R root:root /srv/cmangos/assets/extracted
+chmod 0755 /srv/cmangos/assets/extracted
+
+aws s3 cp "s3://${bucket}/${extracted_key}" /tmp/cmangos-extracted.tar.zst
+
+apt-get update -y
+apt-get install -y zstd tar
+
+tar --use-compress-program=unzstd -xvf \
+  /tmp/cmangos-extracted.tar.zst \
+  -C /srv/cmangos/assets/extracted
+
+rm -f /tmp/cmangos-extracted.tar.zst
+
+ls -lah /srv/cmangos/assets/extracted | sed -n '1,120p'
+du -sh /srv/cmangos/assets/extracted/dbc \
+      /srv/cmangos/assets/extracted/maps \
+      /srv/cmangos/assets/extracted/vmaps \
+      /srv/cmangos/assets/extracted/mmaps || true
+
+
+# Phase 6: Start persistent container WITH mounts
+docker rm -f cmangos 2>/dev/null || true
+docker run -d --name cmangos \
+  -v /srv/cmangos/etc:/opt/cmangos/run/etc \
+  -v /srv/cmangos/assets/extracted/dbc:/opt/cmangos/run/bin/dbc:ro \
+  -v /srv/cmangos/assets/extracted/maps:/opt/cmangos/run/bin/maps:ro \
+  -v /srv/cmangos/assets/extracted/vmaps:/opt/cmangos/run/bin/vmaps:ro \
+  -v /srv/cmangos/assets/extracted/mmaps:/opt/cmangos/run/bin/mmaps:ro \
+  -v /srv/cmangos/assets:/srv/cmangos/assets \
+  cmangos-classic:local \
+  tail -f /dev/null
+
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
