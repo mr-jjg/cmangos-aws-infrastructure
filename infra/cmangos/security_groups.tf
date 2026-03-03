@@ -4,9 +4,25 @@ resource "aws_security_group" "cmangos_sg" {
   vpc_id      = aws_vpc.cmangos.id
 
   ingress {
-    description = "Inbound IP"
+    description = "SSH"
     from_port   = 22
     to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.ssh_allowed_cidrs
+  }
+
+  ingress {
+    description = "WoW Auth (realmd)"
+    from_port   = 3724
+    to_port     = 3724
+    protocol    = "tcp"
+    cidr_blocks = var.ssh_allowed_cidrs
+  }
+
+  ingress {
+    description = "WoW World (mangosd)"
+    from_port   = 8085
+    to_port     = 8085
     protocol    = "tcp"
     cidr_blocks = var.ssh_allowed_cidrs
   }

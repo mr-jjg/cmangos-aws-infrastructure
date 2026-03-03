@@ -1,0 +1,10 @@
+#!/bin/bash
+
+apt-get update
+apt-get install -y mysql-client
+
+cd /srv
+git clone https://github.com/cmangos/classic-db.git
+chown -R ubuntu:ubuntu /srv/classic-db
+
+cd /srv/classic-db

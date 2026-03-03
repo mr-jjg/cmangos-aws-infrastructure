@@ -66,3 +66,45 @@ variable "root_volume_size_gb" {
   type    = number
   default = 50
 }
+
+
+### RDS ###
+
+variable "db_name" {
+  type    = string
+  default = "cmangos"
+}
+
+variable "db_username" {
+  type = string
+}
+
+variable "db_password" {
+  type      = string
+  sensitive = true
+}
+
+variable "db_engine_version" {
+  type    = string
+  default = "8.0.36"
+}
+
+variable "db_parameter_group_family" {
+  type    = string
+  default = "mysql8.0"
+}
+
+variable "db_instance_class" {
+  type    = string
+  default = "db.t3.micro"
+}
+
+variable "db_allocated_storage_gb" {
+  type    = number
+  default = 20
+}
+
+variable "db_max_allocated_storage_gb" {
+  type    = number
+  default = 100
+}

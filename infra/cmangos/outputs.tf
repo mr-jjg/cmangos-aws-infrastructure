@@ -13,3 +13,15 @@ output "cmangos_ec2_sg_id" {
 output "public_ip" {
   value = aws_instance.cmangos.public_ip
 }
+
+output "rds_endpoint" {
+  value = aws_db_instance.cmangos.address
+}
+
+output "rds_port" {
+  value = aws_db_instance.cmangos.port
+}
+
+output "rds_db_name" {
+  value = aws_db_instance.cmangos.db_name
+}
