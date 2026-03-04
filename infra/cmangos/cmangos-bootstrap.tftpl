@@ -167,3 +167,25 @@ docker run -d --name cmangos \
   tail -f /dev/null
 
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+
+cat >/etc/cmangos.env <<EOF
+RDS_ENDPOINT="${rds_endpoint}"
+RDS_PORT="${rds_port}"
+PUBLIC_IP="${public_ip}"
+RDS_MASTER_USER="${rds_master_user}"
+RDS_MASTER_PASS="${rds_master_pass}"
+CORE_PATH="/srv/cmangos/mangos"
+EOF
+chmod 600 /etc/cmangos.env
+
+aws s3 cp \
+"s3://${bucket}/scripts/classic-db-bootstrap.sh" \
+/usr/local/bin/classic-db-bootstrap.sh
+
+chmod +x /usr/local/bin/classic-db-bootstrap.sh
+
+set -a
+. /etc/cmangos.env
+set +a
+
+/usr/local/bin/classic-db-bootstrap.sh

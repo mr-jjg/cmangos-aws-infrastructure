@@ -11,7 +11,7 @@ output "cmangos_ec2_sg_id" {
 }
 
 output "public_ip" {
-  value = aws_instance.cmangos.public_ip
+  value = aws_eip.cmangos.public_ip
 }
 
 output "rds_endpoint" {

@@ -22,6 +22,15 @@ data "aws_ami" "ubuntu_2404" {
   }
 }
 
+resource "aws_eip" "cmangos" {
+  vpc = true
+}
+
+resource "aws_eip_association" "cmangos" {
+  instance_id   = aws_instance.cmangos.id
+  allocation_id = aws_eip.cmangos.id
+}
+
 resource "aws_instance" "cmangos" {
   ami           = data.aws_ami.ubuntu_2404.id
   instance_type = var.instance_type
@@ -39,10 +48,15 @@ resource "aws_instance" "cmangos" {
   }
 
   user_data = templatefile("${path.module}/cmangos-bootstrap.tftpl", {
-    bucket         = var.cmangos_bucket
-    config_version = var.config_version
-    client_key     = var.client_key
-    extracted_key  = var.extracted_key
+    bucket          = var.cmangos_bucket
+    config_version  = var.config_version
+    client_key      = var.client_key
+    extracted_key   = var.extracted_key
+    rds_endpoint    = aws_db_instance.cmangos.address
+    rds_port        = aws_db_instance.cmangos.port
+    public_ip       = aws_eip.cmangos.public_ip
+    rds_master_user = var.db_username
+    rds_master_pass = var.db_password
   })
 
   tags = {
