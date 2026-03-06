@@ -153,10 +153,117 @@ du -sh /srv/cmangos/assets/extracted/dbc \
       /srv/cmangos/assets/extracted/vmaps \
       /srv/cmangos/assets/extracted/mmaps || true
 
+# Phase 6: Prepare environment files for bootstrap + container
+set +x
 
-# Phase 6: Start persistent container WITH mounts
-docker rm -f cmangos 2>/dev/null || true
-docker run -d --name cmangos \
+# 1) Bash-safe env file for scripts that use: . /etc/cmangos.env.sh
+tee /etc/cmangos.env.sh >/dev/null <<EOF
+RDS_ENDPOINT=${rds_endpoint}
+RDS_PORT=${rds_port}
+PUBLIC_IP=${public_ip}
+RDS_MASTER_USER=${rds_master_user}
+RDS_MASTER_PASS=${rds_master_pass}
+CORE_PATH=/srv/cmangos/mangos
+
+Mangosd_LoginDatabaseInfo="${rds_endpoint};${rds_port};${rds_master_user};${rds_master_pass};classicrealmd"
+Mangosd_WorldDatabaseInfo="${rds_endpoint};${rds_port};${rds_master_user};${rds_master_pass};classicmangos"
+Mangosd_CharacterDatabaseInfo="${rds_endpoint};${rds_port};${rds_master_user};${rds_master_pass};classiccharacters"
+Mangosd_LogsDatabaseInfo="${rds_endpoint};${rds_port};${rds_master_user};${rds_master_pass};classiclogs"
+Mangosd_Console_Enable=0
+
+Realmd_LoginDatabaseInfo="${rds_endpoint};${rds_port};${rds_master_user};${rds_master_pass};classicrealmd"
+EOF
+
+chmod 600 /etc/cmangos.env.sh
+
+# 2) Docker-safe env file with no quotes in final values
+bash -lc '
+set -a
+. /etc/cmangos.env.sh
+set +a
+
+cat >/etc/cmangos.env <<EOV
+RDS_ENDPOINT=$${RDS_ENDPOINT}
+RDS_PORT=$${RDS_PORT}
+PUBLIC_IP=$${PUBLIC_IP}
+RDS_MASTER_USER=$${RDS_MASTER_USER}
+RDS_MASTER_PASS=$${RDS_MASTER_PASS}
+CORE_PATH=$${CORE_PATH}
+
+Mangosd_LoginDatabaseInfo=$${Mangosd_LoginDatabaseInfo}
+Mangosd_WorldDatabaseInfo=$${Mangosd_WorldDatabaseInfo}
+Mangosd_CharacterDatabaseInfo=$${Mangosd_CharacterDatabaseInfo}
+Mangosd_LogsDatabaseInfo=$${Mangosd_LogsDatabaseInfo}
+Mangosd_Console_Enable=$${Mangosd_Console_Enable}
+
+Realmd_LoginDatabaseInfo=$${Realmd_LoginDatabaseInfo}
+EOV
+
+chmod 600 /etc/cmangos.env
+'
+
+set -x
+
+# Pull DB bootstrap script first
+aws s3 cp "s3://${bucket}/scripts/classic-db-bootstrap.sh" /usr/local/bin/classic-db-bootstrap.sh
+chmod +x /usr/local/bin/classic-db-bootstrap.sh
+
+/usr/local/bin/classic-db-bootstrap.sh
+tail -n 50 /var/log/classic-db-bootstrap.log || true
+bash -lc 'set -a; . /etc/cmangos.env.sh; set +a; mysql -h "$RDS_ENDPOINT" -P "$RDS_PORT" -u "$RDS_MASTER_USER" -p"$RDS_MASTER_PASS" -e "SHOW DATABASES LIKE '\''classicmangos'\'';" | grep -q classicmangos'
+
+cat >/etc/systemd/system/cmangos-realmd.service <<'EOF'
+[Unit]
+Description=CMaNGOS Classic realmd (login server) container
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+
+ExecStartPre=/bin/sh -lc 'until /usr/bin/docker info >/dev/null 2>&1; do sleep 1; done'
+ExecStartPre=-/usr/bin/docker rm -f cmangos-realmd
+
+ExecStart=/usr/bin/docker run --name cmangos-realmd \
+  -p 3724:3724/tcp \
+  --env-file /etc/cmangos.env \
+  --log-driver=journald \
+  -v /srv/cmangos/etc:/opt/cmangos/run/etc \
+  -v /srv/cmangos/assets:/srv/cmangos/assets \
+  cmangos-classic:local \
+  /opt/cmangos/run/bin/realmd -c /opt/cmangos/run/etc/realmd.conf
+
+ExecStop=/usr/bin/docker stop cmangos-realmd
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/cmangos-mangosd.service <<'EOF'
+[Unit]
+Description=CMaNGOS Classic mangosd (world server) container
+After=docker.service network-online.target cmangos-realmd.service
+Wants=network-online.target
+Requires=docker.service
+Requires=cmangos-realmd.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+
+ExecStartPre=/bin/sh -lc 'until /usr/bin/docker info >/dev/null 2>&1; do sleep 1; done'
+ExecStartPre=-/usr/bin/docker rm -f cmangos-mangosd
+
+ExecStart=/usr/bin/docker run --name cmangos-mangosd \
+  -p 8085:8085/tcp \
+  --workdir /opt/cmangos/run/bin \
+  --env-file /etc/cmangos.env \
+  --log-driver=journald \
   -v /srv/cmangos/etc:/opt/cmangos/run/etc \
   -v /srv/cmangos/assets/extracted/dbc:/opt/cmangos/run/bin/dbc:ro \
   -v /srv/cmangos/assets/extracted/maps:/opt/cmangos/run/bin/maps:ro \
@@ -164,28 +271,15 @@ docker run -d --name cmangos \
   -v /srv/cmangos/assets/extracted/mmaps:/opt/cmangos/run/bin/mmaps:ro \
   -v /srv/cmangos/assets:/srv/cmangos/assets \
   cmangos-classic:local \
-  tail -f /dev/null
+  /opt/cmangos/run/bin/mangosd -c /opt/cmangos/run/etc/mangosd.conf
 
-docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+ExecStop=/usr/bin/docker stop cmangos-mangosd
+TimeoutStopSec=30
 
-cat >/etc/cmangos.env <<EOF
-RDS_ENDPOINT="${rds_endpoint}"
-RDS_PORT="${rds_port}"
-PUBLIC_IP="${public_ip}"
-RDS_MASTER_USER="${rds_master_user}"
-RDS_MASTER_PASS="${rds_master_pass}"
-CORE_PATH="/srv/cmangos/mangos"
+[Install]
+WantedBy=multi-user.target
 EOF
-chmod 600 /etc/cmangos.env
 
-aws s3 cp \
-"s3://${bucket}/scripts/classic-db-bootstrap.sh" \
-/usr/local/bin/classic-db-bootstrap.sh
-
-chmod +x /usr/local/bin/classic-db-bootstrap.sh
-
-set -a
-. /etc/cmangos.env
-set +a
-
-/usr/local/bin/classic-db-bootstrap.sh
+systemctl daemon-reload
+systemctl enable --now cmangos-realmd.service
+systemctl enable --now cmangos-mangosd.service
